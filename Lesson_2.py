@@ -4,6 +4,7 @@ import requests
 from urllib.parse import urljoin
 import bs4
 import pymongo
+import datetime as dt
 
 
 class GbBlogParse:
@@ -31,11 +32,14 @@ class GbBlogParse:
             if response.status_code == 200:
                 return response
 
+    #  метод, достающий response и складыающий его в callback
     def get_task(self, url: str, callback: typing.Callable) -> typing.Callable:
         def task():
             response = self._get_response(url)
             return callback(response)
+
         return task
+
 
     def tasks_creator(self, urls: set, callback: typing.Callable):
         urls_set = urls - self.done_urls
@@ -53,6 +57,8 @@ class GbBlogParse:
             except IndexError:
                 break
 
+
+    # метод , собирающий страницы с постами (пагинации)
     def parse_feed(self, response: requests.Response):
         soup = bs4.BeautifulSoup(response.text, 'lxml')
         ul_pagination = soup.find('ul', attrs={"class": "gb__pagination"})
@@ -72,36 +78,51 @@ class GbBlogParse:
             self.parse_post
         )
 
+    '''Домашнее задание.  Собрать поля:
+    url страницы материала +
+    Заголовок материала +
+    Первое изображение материала (Ссылка)+
+    Дата публикации (в формате datetime) +
+    имя автора материала  +
+    ссылка на страницу автора материала +
+    комментарии в виде (автор комментария и текст комментария)'''
+
+    def get_comments(self, commentable_id):
+        comments = []
+        url_comments = f'https://gb.ru/api/v2/comments?commentable_id={commentable_id}&commentable_type=Post'
+        for el in self._get_response(url_comments).json():
+            comments_data={
+                'author': el['user']['full_name'],
+                'comment': el['comment']['body'],
+            }
+            comments.append(comments_data)
+
+            return comments
+
+
     def parse_post(self, response: requests.Response):
         soup = bs4.BeautifulSoup(response.text, 'lxml')
         author_name_tag = soup.find('div', attrs={"itemprop": "author"})
+        created_date= soup.find('time', attrs = {'class': 'text-md'}).attrs['datetime']
+        commentable_id = soup.find("comments").attrs.get("commentable-id")
         data = {
-            "post_data": {
-                "title": soup.find("h1", attrs={"class": "blogpost-title"}).text,
-                "url": response.url,
-                "id": soup.find("comments").attrs.get("commentable-id"),
+            'url': response.url,
+            "title": soup.find('h1', attrs={'class': "blogpost-title"}).text,
+            "author": {
+                'url': urljoin(response.url, author_name_tag.parent.attrs["href"]),
+                'name': author_name_tag.text,
             },
-            "author_data": {
-                "url": urljoin(response.url, author_name_tag.parent.attrs.get("href")),
-                "name": author_name_tag.text,
-            },
-            "tags_data": [
-                {"name": tag.text, "url": urljoin(response.url, tag.attrs.get("href"))}
-                for tag in soup.find_all("a", attrs={"class": "small"})
-            ],
-            "comments_data": self._get_comments(soup.find("comments").attrs.get("commentable-id")),
+            'image': soup.find('img').attrs['src'],
+            'created_at': dt.datetime.strptime(created_date, "%Y-%m-%dT%H:%M:%S%z"),
+            'comments': self.get_comments(commentable_id)
         }
         self._save(data)
+
+
 
     def _save(self, data: dict):
         collection = self.db["gb_blog_parse"]
         collection.insert_one(data)
-
-    def _get_comments(self, post_id):
-        api_path = f"/api/v2/comments?commentable_type=Post&commentable_id={post_id}&order=desc"
-        response = self._get_response(urljoin(self.start_url, api_path))
-        data = response.json()
-        return data
 
 
 if __name__ == '__main__':
